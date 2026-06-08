@@ -1,0 +1,25 @@
+[project]
+name = "fhir-mcp"
+version = "0.1.0"
+description = "First MCP server: synthetic FHIR read + gated write, with audit logging."
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp>=3.2,<4",
+    "pydantic>=2.6,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,63 @@
+{
+  "patients": [
+    {
+      "id": "pat-001",
+      "name": "Jordan Synthetic",
+      "birth_date": "1985-03-12",
+      "gender": "female",
+      "mrn": "SYN-0001"
+    },
+    {
+      "id": "pat-002",
+      "name": "Alex Testcase",
+      "birth_date": "1972-11-30",
+      "gender": "male",
+      "mrn": "SYN-0002"
+    },
+    {
+      "id": "pat-003",
+      "name": "Sam Placeholder",
+      "birth_date": "1998-07-04",
+      "gender": "other",
+      "mrn": "SYN-0003"
+    }
+  ],
+  "observations": [
+    {
+      "id": "obs-001",
+      "patient_id": "pat-001",
+      "code": "8867-4",
+      "display": "Heart rate",
+      "value": 72.0,
+      "unit": "beats/min",
+      "effective_date": "2026-05-01"
+    },
+    {
+      "id": "obs-002",
+      "patient_id": "pat-001",
+      "code": "8480-6",
+      "display": "Systolic blood pressure",
+      "value": 118.0,
+      "unit": "mmHg",
+      "effective_date": "2026-05-01"
+    },
+    {
+      "id": "obs-003",
+      "patient_id": "pat-002",
+      "code": "8867-4",
+      "display": "Heart rate",
+      "value": 81.0,
+      "unit": "beats/min",
+      "effective_date": "2026-04-18"
+    },
+    {
+      "id": "obs-eaa55f02",
+      "patient_id": "pat-001",
+      "code": "8310-5",
+      "display": "Body temperature",
+      "value": 98.6,
+      "unit": "degF",
+      "effective_date": "2026-06-01"
+    }
+  ]
+}

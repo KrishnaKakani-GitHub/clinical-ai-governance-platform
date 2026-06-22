@@ -1,112 +1,137 @@
-# FHIR MCP Server (your first MCP server)
+# Clinical AI Governance Platform
 
-A small, runnable MCP server for learning the pattern: **synthetic** FHIR-shaped
-data, read tools, and a **gated write** (agent proposes → human approves →
-commit), with **structured audit logging** on every call.
+> **Agents propose. A deterministic layer validates. A human approves. Every action is audited.**
 
-> All data here is synthetic. This is a development/learning server. It is NOT
-> production-ready (no auth, JSON file instead of a database, audit logs to
-> stderr instead of a tamper-evident sink). See "What's deliberately missing."
+A production-grade reference implementation for deploying LLM agents over clinical data with deterministic safety guardrails. Built as a reusable framework for healthcare operators — deploy once, apply across a portfolio of growth-stage companies.
 
-## What it does
+## Architecture
 
-Tools Claude can call:
-- `list_patients` — list synthetic patient IDs
-- `get_patient` — read one patient's demographics
-- `list_observations` — list a patient's observations
-- `propose_observation` — **stage** a new observation (does NOT commit)
-- `list_pending_writes` — show writes awaiting approval
-- `approve_write` — **human-in-the-loop gate**: commit a staged write
-- `reject_write` — reject a staged write
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│           Clinical AI Governance Platform                          │
+│                                                                    │
+│  Agent SDK Orchestration  (src/clinical_agent/)  [Day 4]          │
+│  ┌────────────┐  ┌────────────┐  ┌──────────────────┐       │
+│  │  Reader     │─▶│  RAG        │─▶│  Proposal          │       │
+│  │  Subagent   │  │  Subagent   │  │  Subagent          │       │
+│  │  (FHIR read)│  │  (guidelines│  │  (structured out,  │       │
+│  │             │  │   search)   │  │   confidence,      │       │
+│  └────────────┘  └────────────┘  │   citations)       │       │
+│  SDK Hooks: audit every tool call + cost/latency └──────────────────┘       │
+│                                                                    │
+│  MCP Server  (src/fhir_mcp/)  FastMCP 3.x  stdio + SSE            │
+│  Tools:    list_patients · get_patient · list_observations         │
+│             propose_observation · list_pending_writes              │
+│             approve_write · reject_write                           │
+│  Resources: fhir://patient/{id}/summary  [Day 4]                  │
+│  Prompts:   review_pending · patient_overview  [Day 4]            │
+│                                                                    │
+│  Deterministic Validation  (validator.py)  [Day 2]                │
+│  LOINC registry · value ranges · unit checks                      │
+│                                                                    │
+│  ┌────────────────┐  ┌────────────────┐  ┌─────────────────┐ │
+│  │ SQLite Store  │  │ ChromaDB [Day3] │  │ Audit Chain     │ │
+│  │ WAL mode      │  │ clinical        │  │ SHA-256 JSONL   │ │
+│  │ FK enforced   │  │ guidelines      │  │ tamper-evident  │ │
+│  └────────────────┘  └────────────────┘  └─────────────────┘ │
+│                                                                    │
+│  Eval Harness  (evals/)  [Day 6]                                  │
+│  25 golden cases · LLM-as-judge · code grading · CI regression   │
+└──────────────────────────────────────────────────────────────────────┘
+```
 
-The agent can read and propose. It **cannot** commit a write — only
-`approve_write`/`reject_write`, meant to be driven by a human, can.
+## Build status
 
-## Mental model
+| Component | Status |
+|---|---|
+| SQLite persistence (WAL, FK) | ✓ Day 1 |
+| Tamper-evident audit (SHA-256 chain) | ✓ Day 1 |
+| Auth (principal + approver sets) | ✓ Day 1 |
+| LOINC deterministic validation | Day 2 |
+| Clinical data (guidelines, notes) | Day 2 |
+| RAG — BM25 + ChromaDB hybrid | Day 3 |
+| Agent SDK orchestration (3 subagents) | Day 4 |
+| Clinical NLP + confidence scoring | Day 5 |
+| Eval harness + GitHub Actions CI | Day 6 |
+| HTTP server + Railway deploy | Day 7 |
 
-Your server is a passive provider. Claude Code launches it as a subprocess,
-asks "what tools do you have?", and calls them. The server never calls Claude.
-Communication is over **stdio** (stdin/stdout) — which is why audit logs go to
-**stderr**, so they never collide with protocol traffic.
+## Metrics
+
+*Updated after eval harness ships on Day 6.*
+
+| Metric | Value |
+|---|---|
+| Proposal accuracy (approve/reject) | TBD |
+| False-negative rate (missed invalid proposals) | TBD |
+| Avg confidence on correct proposals | TBD |
+| Avg latency per workflow (ms) | TBD |
+| Avg cost per workflow (USD) | TBD |
 
 ## Setup
 
 ```bash
-cd fhir-mcp
-python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
+python scripts/seed_db.py   # initialise SQLite from synthetic JSON fixture
+pytest -q                   # all tests green
 ```
-
-## Run the tests
-
-```bash
-pytest -q
-```
-
-## Run the server directly (sanity check)
-
-```bash
-python -m fhir_mcp.server
-```
-It will wait for a client on stdio (Ctrl-C to exit). Normal — it's passive.
 
 ## Connect to Claude Code
 
-From your project directory:
+```bash
+claude mcp add clinical-governance -- /path/to/.venv/bin/python -m fhir_mcp.server
+```
+
+Environment variables:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `FHIR_MCP_DB` | `data/fhir.db` | SQLite database path |
+| `FHIR_MCP_ACTOR` | `agent:dev` | Agent audit identity |
+| `FHIR_MCP_AUDIT_FILE` | stderr | Audit JSONL path |
+| `FHIR_MCP_PRINCIPALS` | *(unset = dev mode)* | Allowed agent actor IDs |
+| `FHIR_MCP_APPROVERS` | *(unset = dev mode)* | Allowed human approver IDs |
+
+## Verify audit chain integrity
 
 ```bash
-claude mcp add fhir-synthetic -- /full/path/to/fhir-mcp/.venv/bin/python -m fhir_mcp.server
+python scripts/audit_verify.py data/audit.jsonl
+# ✓ Chain intact — no tampering detected.
 ```
 
-Notes:
-- Use the **venv's** python (full path) so dependencies resolve.
-- `--` separates Claude's flags from the command that launches your server.
-- Default scope is local (just you). Add `--scope project` to share via
-  `.mcp.json`, or `--scope user` for all your projects.
-- Set the agent identity / data path via env if needed:
-  `claude mcp add fhir-synthetic --env FHIR_MCP_ACTOR=agent:dev -- <python> -m fhir_mcp.server`
-
-Verify:
-```bash
-claude mcp list          # should show fhir-synthetic
-```
-Inside a Claude Code session, type `/mcp` to see/reconnect servers. Then ask
-something like: *"List the patients, then read pat-001."*
-
-## In VS Code
-
-The Claude Code extension uses the same configuration. Once `claude mcp add`
-has registered the server, the tools are available in the extension's Claude
-Code sessions too — open the Spark panel and ask it to use the tools.
-
-## Configuration
-
-- `FHIR_MCP_DATA` — path to the JSON data file (defaults to `data/synthetic_patients.json`)
-- `FHIR_MCP_ACTOR` — the agent's audit identity (defaults to `agent:dev`)
-
-## What's deliberately missing (the path to production)
-
-This is v1. To harden, in order:
-1. **Deterministic validation layer** — richer clinical checks (valid LOINC,
-   value ranges) before a write can even be staged. (Basic checks exist in
-   `store.stage_write`.)
-2. **Auth** — authenticate the caller so the audit `actor` can't be spoofed.
-3. **Tamper-evident audit sink** — append-only store, not stderr.
-4. **Real persistence** — replace the JSON file with a transactional database.
-5. **Remote HTTPS hosting** — only needed to connect as a *claude.ai* web
-   connector; not needed for local Claude Code use.
-
-## Files
+## Repository structure
 
 ```
-src/fhir_mcp/
-  models.py   # Pydantic v2 models (FHIR subset + pending-write records)
-  store.py    # the only module that touches data; holds the write gate
-  audit.py    # structured audit logging (IDs only, never contents)
-  server.py   # FastMCP server: the tools Claude calls
-tests/
-  test_store.py
-data/
-  synthetic_patients.json   # editable synthetic data
+src/
+  fhir_mcp/          # MCP server
+    server.py        # FastMCP tools + auth calls
+    store.py         # SQLite store (the only PHI touchpoint)
+    models.py        # Pydantic v2 FHIR models
+    audit.py         # Tamper-evident hash-chain audit
+    auth.py          # Principal + approver verification
+    validator.py     # LOINC deterministic validation [Day 2]
+    rag.py           # BM25 + ChromaDB hybrid search [Day 3]
+    nlp.py           # Entity extraction → ICD-10/LOINC/NPI [Day 5]
+    confidence.py    # Calibrated confidence scoring [Day 5]
+    http_server.py   # FastAPI SSE transport [Day 7]
+  clinical_agent/    # Agent SDK orchestration [Day 4]
+    orchestrator.py
+    subagents.py
+    hooks.py
+evals/               # Eval harness [Day 6]
+data/                # Synthetic FHIR data + SQLite DB
+scripts/
+  seed_db.py         # JSON → SQLite migration
+  audit_verify.py    # Chain integrity verifier
+docs/
+  architecture.md    # Full system design
+  adr/               # Architecture Decision Records
 ```
+
+## Scaling to a portfolio company
+
+See [docs/scale.md](docs/scale.md). The governance pattern is domain-agnostic: swap `loinc_rules.json`, set principals, point at a new database, deploy.
+
+## Architecture deep-dive
+
+See [docs/architecture.md](docs/architecture.md).

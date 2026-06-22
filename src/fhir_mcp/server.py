@@ -1,20 +1,24 @@
 """FHIR MCP server — Clinical AI Governance Platform.
 
 This is the file Claude Code and the Agent SDK launch. It defines:
-  - 7 tools (3 read, 4 write-gate)
-  - 1 MCP resource (fhir://patient/{patient_id}/summary)
+  - 8 tools (3 read, 4 write-gate, 1 RAG search)
+  - 2 MCP resources (fhir://patient/{id}/summary, fhir://guidelines/index)
   - 2 MCP prompts (review_pending, patient_overview)
 
 Each tool:
   1. Verifies the caller's identity (auth layer)
-  2. Delegates to the store
+  2. Delegates to the store / RAG
   3. Emits a tamper-evident audit record on both success and error paths
 
-Prompt caching: the system block and clinical guidelines block are marked
+Prompt caching: the system block and the guidelines block are marked
 with cache_control breakpoints so repeated calls reuse the KV cache.
 
+Extended thinking (Day 4 routing): when a proposal value is above the
+clinical flag threshold, the orchestrator routes the Proposal Subagent
+into extended thinking mode (budget_tokens=5000) before finalising.
+
 The write gate invariant is preserved:
-  - Agents can READ and PROPOSE
+  - Agents can READ, SEARCH, and PROPOSE
   - Only a verified human approver can COMMIT via approve_write
 
 Run locally:   python -m fhir_mcp.server
@@ -33,6 +37,7 @@ from fastmcp import FastMCP
 from .audit import audit
 from .auth import AuthError, verify_agent_actor, verify_approver
 from .models import ProposedObservation
+from .rag import get_rag
 from .store import FhirStore, StoreError
 from .validator import get_rules
 
@@ -95,6 +100,67 @@ def list_observations(patient_id: str, reason: str) -> list[dict]:
     audit(actor=_AGENT_ACTOR, action="list_observations", reason=reason,
           target_ids=[patient_id])
     return [o.model_dump(mode="json") for o in obs]
+
+
+# --- RAG search tool ----------------------------------------------------------
+
+
+@mcp.tool()
+def search_guidelines(
+    query: str,
+    k: int = 4,
+    loinc_codes: str = "",
+    reason: str = "",
+) -> list[dict]:
+    """Search clinical guidelines using hybrid BM25 + semantic retrieval.
+
+    Returns ranked guidelines relevant to the query. Use this before proposing
+    an observation to ground the proposal in evidence-based thresholds.
+
+    Args:
+        query:       Clinical question (e.g. 'heart rate threshold for AF rate control').
+        k:           Number of results (default 4, max 8).
+        loinc_codes: Optional comma-separated LOINC codes to filter by
+                     (e.g. '8867-4,55284-4').
+        reason:      Why you are searching (audited).
+    """
+    try:
+        verify_agent_actor(_AGENT_ACTOR)
+    except AuthError as e:
+        audit(actor=_AGENT_ACTOR, action="search_guidelines", reason=reason,
+              outcome="error", extra={"error": str(e)})
+        raise
+
+    k = min(max(1, k), 8)
+    loinc_filter = [c.strip() for c in loinc_codes.split(",") if c.strip()] or None
+
+    rag = get_rag()
+    results = rag.search_guidelines(query, k=k, loinc_filter=loinc_filter)
+
+    audit(
+        actor=_AGENT_ACTOR, action="search_guidelines", reason=reason,
+        extra={
+            "query": query[:120],
+            "k": k,
+            "loinc_filter": loinc_filter,
+            "result_count": len(results),
+        },
+    )
+    # Return scores + guideline metadata (no embeddings)
+    return [
+        {
+            "rank": r["rank"],
+            "score": r["score"],
+            "id": r["guideline"]["id"],
+            "title": r["guideline"]["title"],
+            "source": r["guideline"]["source"],
+            "condition": r["guideline"]["condition"],
+            "loinc_codes": r["guideline"].get("loinc_codes", []),
+            "content": r["guideline"]["content"],
+            "key_thresholds": r["guideline"].get("key_thresholds", {}),
+        }
+        for r in results
+    ]
 
 
 # --- Gated write tools --------------------------------------------------------
@@ -197,8 +263,6 @@ def reject_write(write_id: str, approver: str, reason: str) -> dict:
 
 
 # --- MCP Resources ------------------------------------------------------------
-# Resources are read-only data providers. The agent can request them by URI.
-# This is distinct from tools: resources provide context, tools take actions.
 
 
 @mcp.resource("fhir://patient/{patient_id}/summary")
@@ -206,8 +270,7 @@ def patient_summary(patient_id: str) -> str:
     """FHIR patient summary as structured text.
 
     Returns demographics + all observations for a patient. Designed for
-    use as context in agent prompts (prompt caching friendly — content
-    is stable within a session if no new observations are committed).
+    use as context in agent prompts (prompt caching friendly).
     """
     try:
         verify_agent_actor(_AGENT_ACTOR)
@@ -237,13 +300,24 @@ def patient_summary(patient_id: str) -> str:
     return "\n".join(lines)
 
 
+@mcp.resource("fhir://guidelines/index")
+def guidelines_index() -> str:
+    """Index of available clinical guidelines (titles + LOINC codes).
+
+    Use this to discover what guidelines are available before calling
+    search_guidelines with a targeted query.
+    """
+    rag = get_rag()
+    lines = ["Clinical Guidelines Index:", ""]
+    for g in rag._guidelines:
+        loinc = ", ".join(g.get("loinc_codes", [])) or "none"
+        lines.append(f"  {g['id']}: {g['title']}")
+        lines.append(f"    Source: {g['source']} | Condition: {g['condition']} | LOINC: {loinc}")
+        lines.append("")
+    return "\n".join(lines)
+
+
 # --- MCP Prompts --------------------------------------------------------------
-# Prompts are reusable message templates. They reduce prompt engineering
-# scattered across callers into a single versioned location.
-#
-# Prompt caching note: the system block and the guidelines block are
-# static within a deployment. Mark them with cache_control breakpoints
-# so the KV cache reuses them across repeated calls.
 
 
 @mcp.prompt()
@@ -283,7 +357,6 @@ def review_pending() -> list[dict[str, Any]]:
                         "LOINC validation rules for this deployment:\n"
                         f"<loinc_rules>\n{rule_summary}\n</loinc_rules>"
                     ),
-                    # Prompt caching: static system block — cache at this breakpoint
                     "cache_control": {"type": "ephemeral"},
                 },
                 {
@@ -300,11 +373,7 @@ def review_pending() -> list[dict[str, Any]]:
 
 @mcp.prompt()
 def patient_overview(patient_id: str) -> list[dict[str, Any]]:
-    """Prompt template for comprehensive patient overview with clinical context.
-
-    Returns an Anthropic messages array with the patient summary pre-loaded
-    as a cacheable context block.
-    """
+    """Prompt template for comprehensive patient overview with clinical context."""
     summary = patient_summary(patient_id)
 
     return [
@@ -324,7 +393,6 @@ def patient_overview(patient_id: str) -> list[dict[str, Any]]:
                         f"{summary}\n"
                         "</patient_summary>"
                     ),
-                    # Prompt caching: patient context block — cache at this breakpoint
                     "cache_control": {"type": "ephemeral"},
                 },
                 {

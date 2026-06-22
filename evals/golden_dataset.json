@@ -1,0 +1,427 @@
+[
+  {
+    "id": "eval-001",
+    "description": "Valid heart rate in normal range",
+    "input": {
+      "patient_id": "pat-001",
+      "code": "8867-4",
+      "display": "Heart rate",
+      "value": 72,
+      "unit": "/min",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "accept",
+    "expected_confidence_tier": "high",
+    "clinical_rationale": "72 /min is within the normal adult resting heart rate range (60-100 /min). No clinical concerns.",
+    "loinc_rule_tested": "8867-4",
+    "test_type": "valid_range"
+  },
+  {
+    "id": "eval-002",
+    "description": "Heart rate above maximum (physiologically impossible)",
+    "input": {
+      "patient_id": "pat-001",
+      "code": "8867-4",
+      "display": "Heart rate",
+      "value": 350,
+      "unit": "/min",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "reject",
+    "expected_confidence_tier": "low",
+    "clinical_rationale": "350 /min exceeds the maximum (300 /min) defined in LOINC rules. Physiologically impossible sustained HR.",
+    "loinc_rule_tested": "8867-4",
+    "test_type": "above_max"
+  },
+  {
+    "id": "eval-003",
+    "description": "Heart rate above clinical flag threshold (warning, not rejection)",
+    "input": {
+      "patient_id": "pat-001",
+      "code": "8867-4",
+      "display": "Heart rate",
+      "value": 215,
+      "unit": "/min",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "accept_with_warning",
+    "expected_confidence_tier": "medium",
+    "clinical_rationale": "215 /min is above the flag_above threshold (200 /min) but within max (300). Should be accepted with clinical warning.",
+    "loinc_rule_tested": "8867-4",
+    "test_type": "above_flag"
+  },
+  {
+    "id": "eval-004",
+    "description": "Heart rate with wrong unit (bpm instead of /min)",
+    "input": {
+      "patient_id": "pat-001",
+      "code": "8867-4",
+      "display": "Heart rate",
+      "value": 72,
+      "unit": "bpm",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "reject",
+    "expected_confidence_tier": "low",
+    "clinical_rationale": "Unit 'bpm' does not match canonical '/min' for LOINC 8867-4. Unit mismatch is a hard rejection.",
+    "loinc_rule_tested": "8867-4",
+    "test_type": "unit_mismatch"
+  },
+  {
+    "id": "eval-005",
+    "description": "Systolic BP within normal range",
+    "input": {
+      "patient_id": "pat-001",
+      "code": "55284-4",
+      "display": "Systolic blood pressure",
+      "value": 128,
+      "unit": "mm[Hg]",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "accept",
+    "expected_confidence_tier": "high",
+    "clinical_rationale": "128 mm[Hg] is within normal SBP range and below JNC 8 treatment initiation threshold.",
+    "loinc_rule_tested": "55284-4",
+    "test_type": "valid_range"
+  },
+  {
+    "id": "eval-006",
+    "description": "Systolic BP above max (impossible)",
+    "input": {
+      "patient_id": "pat-001",
+      "code": "55284-4",
+      "display": "Systolic blood pressure",
+      "value": 350,
+      "unit": "mm[Hg]",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "reject",
+    "expected_confidence_tier": "low",
+    "clinical_rationale": "350 mm[Hg] exceeds SBP max (300). Physiologically impossible.",
+    "loinc_rule_tested": "55284-4",
+    "test_type": "above_max"
+  },
+  {
+    "id": "eval-007",
+    "description": "Hypertensive urgency SBP (above flag threshold)",
+    "input": {
+      "patient_id": "pat-001",
+      "code": "55284-4",
+      "display": "Systolic blood pressure",
+      "value": 185,
+      "unit": "mm[Hg]",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "accept_with_warning",
+    "expected_confidence_tier": "medium",
+    "clinical_rationale": "185 mm[Hg] is above the hypertensive urgency flag (180 mm[Hg]). Valid but clinically urgent.",
+    "loinc_rule_tested": "55284-4",
+    "test_type": "above_flag"
+  },
+  {
+    "id": "eval-008",
+    "description": "Normal body temperature (Fahrenheit)",
+    "input": {
+      "patient_id": "pat-001",
+      "code": "8310-5",
+      "display": "Body temperature",
+      "value": 98.6,
+      "unit": "degF",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "accept",
+    "expected_confidence_tier": "high",
+    "clinical_rationale": "98.6 degF is the canonical normal body temperature.",
+    "loinc_rule_tested": "8310-5",
+    "test_type": "valid_range"
+  },
+  {
+    "id": "eval-009",
+    "description": "Temperature submitted in Celsius (wrong unit)",
+    "input": {
+      "patient_id": "pat-001",
+      "code": "8310-5",
+      "display": "Body temperature",
+      "value": 37.0,
+      "unit": "Cel",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "reject",
+    "expected_confidence_tier": "low",
+    "clinical_rationale": "Unit 'Cel' does not match canonical 'degF' for LOINC 8310-5.",
+    "loinc_rule_tested": "8310-5",
+    "test_type": "unit_mismatch"
+  },
+  {
+    "id": "eval-010",
+    "description": "High fever (above flag threshold)",
+    "input": {
+      "patient_id": "pat-001",
+      "code": "8310-5",
+      "display": "Body temperature",
+      "value": 104.5,
+      "unit": "degF",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "accept_with_warning",
+    "expected_confidence_tier": "medium",
+    "clinical_rationale": "104.5 degF is above the flag threshold (104 degF). Clinically significant fever.",
+    "loinc_rule_tested": "8310-5",
+    "test_type": "above_flag"
+  },
+  {
+    "id": "eval-011",
+    "description": "Normal SpO2",
+    "input": {
+      "patient_id": "pat-001",
+      "code": "59408-5",
+      "display": "Oxygen saturation by pulse oximetry",
+      "value": 98,
+      "unit": "%",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "accept",
+    "expected_confidence_tier": "high",
+    "clinical_rationale": "98% SpO2 is normal.",
+    "loinc_rule_tested": "59408-5",
+    "test_type": "valid_range"
+  },
+  {
+    "id": "eval-012",
+    "description": "SpO2 below supplemental oxygen threshold (valid measurement)",
+    "input": {
+      "patient_id": "pat-001",
+      "code": "59408-5",
+      "display": "Oxygen saturation by pulse oximetry",
+      "value": 86,
+      "unit": "%",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "accept",
+    "expected_confidence_tier": "high",
+    "clinical_rationale": "86% is within valid range (50-100%). Below oxygen threshold but valid observation.",
+    "loinc_rule_tested": "59408-5",
+    "test_type": "valid_range_clinical_concern"
+  },
+  {
+    "id": "eval-013",
+    "description": "SpO2 impossible value (over 100%)",
+    "input": {
+      "patient_id": "pat-001",
+      "code": "59408-5",
+      "display": "Oxygen saturation by pulse oximetry",
+      "value": 105,
+      "unit": "%",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "reject",
+    "expected_confidence_tier": "low",
+    "clinical_rationale": "105% SpO2 is physiologically impossible. Exceeds maximum (100%).",
+    "loinc_rule_tested": "59408-5",
+    "test_type": "above_max"
+  },
+  {
+    "id": "eval-014",
+    "description": "Normal HbA1c",
+    "input": {
+      "patient_id": "pat-001",
+      "code": "4548-4",
+      "display": "Hemoglobin A1c/Hemoglobin.total in Blood",
+      "value": 6.8,
+      "unit": "%",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "accept",
+    "expected_confidence_tier": "high",
+    "clinical_rationale": "6.8% HbA1c is within valid range and just above the ADA target.",
+    "loinc_rule_tested": "4548-4",
+    "test_type": "valid_range"
+  },
+  {
+    "id": "eval-015",
+    "description": "HbA1c below physiological minimum",
+    "input": {
+      "patient_id": "pat-001",
+      "code": "4548-4",
+      "display": "Hemoglobin A1c/Hemoglobin.total in Blood",
+      "value": 1.5,
+      "unit": "%",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "reject",
+    "expected_confidence_tier": "low",
+    "clinical_rationale": "1.5% HbA1c is below the physiological minimum (2%). Almost certainly a data entry error.",
+    "loinc_rule_tested": "4548-4",
+    "test_type": "below_min"
+  },
+  {
+    "id": "eval-016",
+    "description": "HbA1c above clinical flag (very poorly controlled)",
+    "input": {
+      "patient_id": "pat-001",
+      "code": "4548-4",
+      "display": "Hemoglobin A1c/Hemoglobin.total in Blood",
+      "value": 15.5,
+      "unit": "%",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "accept_with_warning",
+    "expected_confidence_tier": "medium",
+    "clinical_rationale": "15.5% exceeds the flag threshold (15%). Clinically possible but requires verification.",
+    "loinc_rule_tested": "4548-4",
+    "test_type": "above_flag"
+  },
+  {
+    "id": "eval-017",
+    "description": "Normal blood glucose (fasting)",
+    "input": {
+      "patient_id": "pat-001",
+      "code": "2339-0",
+      "display": "Glucose [Mass/volume] in Blood",
+      "value": 95,
+      "unit": "mg/dL",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "accept",
+    "expected_confidence_tier": "high",
+    "clinical_rationale": "95 mg/dL is within the ADA fasting glucose target range (80-130 mg/dL).",
+    "loinc_rule_tested": "2339-0",
+    "test_type": "valid_range"
+  },
+  {
+    "id": "eval-018",
+    "description": "Critically high blood glucose",
+    "input": {
+      "patient_id": "pat-001",
+      "code": "2339-0",
+      "display": "Glucose [Mass/volume] in Blood",
+      "value": 450,
+      "unit": "mg/dL",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "accept_with_warning",
+    "expected_confidence_tier": "medium",
+    "clinical_rationale": "450 mg/dL exceeds the flag threshold (400 mg/dL). Valid measurement but requires evaluation for DKA/HHS.",
+    "loinc_rule_tested": "2339-0",
+    "test_type": "above_flag"
+  },
+  {
+    "id": "eval-019",
+    "description": "Unknown LOINC code (strict mode)",
+    "input": {
+      "patient_id": "pat-001",
+      "code": "99999-9",
+      "display": "Unknown test",
+      "value": 42,
+      "unit": "unit",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "reject",
+    "expected_confidence_tier": "low",
+    "clinical_rationale": "LOINC code 99999-9 is not in the clinical registry. Unknown codes are rejected in strict mode.",
+    "loinc_rule_tested": null,
+    "test_type": "unknown_code"
+  },
+  {
+    "id": "eval-020",
+    "description": "Negative observation value (basic sanity check)",
+    "input": {
+      "patient_id": "pat-001",
+      "code": "8867-4",
+      "display": "Heart rate",
+      "value": -5,
+      "unit": "/min",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "reject",
+    "expected_confidence_tier": "low",
+    "clinical_rationale": "Negative values are rejected by the basic sanity check before LOINC validation.",
+    "loinc_rule_tested": "8867-4",
+    "test_type": "negative_value"
+  },
+  {
+    "id": "eval-021",
+    "description": "Normal creatinine",
+    "input": {
+      "patient_id": "pat-001",
+      "code": "2160-0",
+      "display": "Creatinine [Mass/volume] in Serum or Plasma",
+      "value": 1.1,
+      "unit": "mg/dL",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "accept",
+    "expected_confidence_tier": "high",
+    "clinical_rationale": "1.1 mg/dL creatinine is within normal range.",
+    "loinc_rule_tested": "2160-0",
+    "test_type": "valid_range"
+  },
+  {
+    "id": "eval-022",
+    "description": "Critical hypercreatininaemia (above flag threshold)",
+    "input": {
+      "patient_id": "pat-001",
+      "code": "2160-0",
+      "display": "Creatinine [Mass/volume] in Serum or Plasma",
+      "value": 12.0,
+      "unit": "mg/dL",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "accept_with_warning",
+    "expected_confidence_tier": "medium",
+    "clinical_rationale": "12.0 mg/dL exceeds flag threshold (10.0) — severe CKD or AKI.",
+    "loinc_rule_tested": "2160-0",
+    "test_type": "above_flag"
+  },
+  {
+    "id": "eval-023",
+    "description": "Normal potassium",
+    "input": {
+      "patient_id": "pat-001",
+      "code": "2823-3",
+      "display": "Potassium [Moles/volume] in Serum or Plasma",
+      "value": 4.2,
+      "unit": "mEq/L",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "accept",
+    "expected_confidence_tier": "high",
+    "clinical_rationale": "4.2 mEq/L potassium is within normal range.",
+    "loinc_rule_tested": "2823-3",
+    "test_type": "valid_range"
+  },
+  {
+    "id": "eval-024",
+    "description": "Critical hyperkalaemia (above flag threshold)",
+    "input": {
+      "patient_id": "pat-001",
+      "code": "2823-3",
+      "display": "Potassium [Moles/volume] in Serum or Plasma",
+      "value": 6.8,
+      "unit": "mEq/L",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "accept_with_warning",
+    "expected_confidence_tier": "medium",
+    "clinical_rationale": "6.8 mEq/L exceeds the critical hyperkalaemia threshold (6.5 mEq/L).",
+    "loinc_rule_tested": "2823-3",
+    "test_type": "above_flag"
+  },
+  {
+    "id": "eval-025",
+    "description": "Unknown patient ID",
+    "input": {
+      "patient_id": "pat-999",
+      "code": "8867-4",
+      "display": "Heart rate",
+      "value": 72,
+      "unit": "/min",
+      "effective_date": "2026-06-01"
+    },
+    "expected_outcome": "reject",
+    "expected_confidence_tier": "low",
+    "clinical_rationale": "Patient pat-999 does not exist in the database.",
+    "loinc_rule_tested": "8867-4",
+    "test_type": "unknown_patient"
+  }
+]

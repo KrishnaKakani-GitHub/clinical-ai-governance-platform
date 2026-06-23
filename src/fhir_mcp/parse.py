@@ -21,8 +21,9 @@ API: NVIDIA NIM (OpenAI-compatible)
   Model: nvidia/nemotron-parse
   Auth:  NVIDIA_API_KEY environment variable
 
-NIM accepts JPEG, PNG, BMP, TIFF, WEBP — NOT raw PDFs.
-PDFs are rendered to per-page PNG images via pypdfium2 before sending.
+NIM accepts one image per request.
+PDFs are rendered to per-page PNG images via pypdfium2; each page is
+sent as a separate NIM call and results are concatenated.
 
 For PHI compliance, deploy NIM self-hosted on-premises so no document
 content leaves your infrastructure. The cloud NIM endpoint is suitable
@@ -51,8 +52,8 @@ _BASE_URL = os.environ.get(
     "https://integrate.api.nvidia.com/v1",
 )
 _MODEL = "nvidia/nemotron-parse"
-_TIMEOUT = 60  # seconds
-_MAX_PAGES = 10  # cap to avoid token limits on large documents
+_TIMEOUT = 60
+_MAX_PAGES = 10
 
 _PARSE_SYSTEM_PROMPT = (
     "You are a clinical document parser. Extract and structure all content "
@@ -101,34 +102,28 @@ class ParseResult:
 
 
 def _is_pdf(source: str | Path | bytes) -> bool:
-    """Detect PDF by URL extension, file extension, or magic bytes."""
     if isinstance(source, bytes):
         return source[:4] == b"%PDF"
     return str(source).lower().endswith(".pdf")
 
 
 def _download_url(url: str) -> bytes:
-    """Fetch a remote URL to bytes."""
     req = urllib.request.Request(url, headers={"User-Agent": "fhir-mcp/1.0"})
     with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
         return resp.read()
 
 
 def _pdf_to_page_images(pdf_bytes: bytes) -> list[str]:
-    """Render PDF pages to base64 PNG strings via pypdfium2.
+    """Render PDF pages to base64 PNG strings (one per page) via pypdfium2.
 
-    Returns one base64 PNG string per page, capped at _MAX_PAGES.
-    pypdfium2 is a pure-Python wheel with bundled libpdfium — no
-    system dependencies required.
-
-    Install: pip install pypdfium2
+    pypdfium2 is a pure-Python wheel with bundled libpdfium.
+    Install: pip install pypdfium2 Pillow
     """
     try:
         import pypdfium2 as pdfium  # type: ignore
     except ImportError as e:
         raise ImportError(
-            "pypdfium2 is required to parse PDF files. "
-            "Install it: pip install pypdfium2"
+            "pypdfium2 required for PDF parsing: pip install pypdfium2 Pillow"
         ) from e
 
     pdf = pdfium.PdfDocument(pdf_bytes)
@@ -137,7 +132,7 @@ def _pdf_to_page_images(pdf_bytes: bytes) -> list[str]:
 
     for i in range(n_pages):
         page = pdf[i]
-        bitmap = page.render(scale=2)  # 2x scale improves OCR quality
+        bitmap = page.render(scale=2)
         pil_image = bitmap.to_pil()
         buf = io.BytesIO()
         pil_image.save(buf, format="PNG")
@@ -148,129 +143,33 @@ def _pdf_to_page_images(pdf_bytes: bytes) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Main entry point
+# NIM API call (one image per request)
 # ---------------------------------------------------------------------------
 
 
-def parse_document(
-    source: str | Path | bytes,
-    document_type: str = "clinical",
-) -> ParseResult:
-    """Parse a clinical document using Nemotron Parse.
+def _call_nim_api(image_b64: str, system_prompt: str) -> tuple[str, int, int]:
+    """Send one base64 PNG image to Nemotron Parse NIM.
 
-    Args:
-        source: One of:
-          - str/Path: local file path (PDF, PNG, JPG, TIFF)
-          - bytes:    raw document bytes
-          - str starting with 'http': public URL (PDF or image)
-        document_type: Hint for the parser. One of:
-          'clinical', 'prior_auth', 'eob', 'treatment_plan', 'lab_report'
-
-    Returns:
-        ParseResult with structured_text (markdown) ready for NLP extraction.
-
-    PDFs are converted to per-page PNG images before sending to NIM,
-    since the NIM API accepts JPEG/PNG/BMP/TIFF/WEBP but not raw PDFs.
-
-    PHI NOTE: Document content is sent to NVIDIA NIM. Use a self-hosted
-    NIM endpoint (NEMOTRON_PARSE_BASE_URL) for documents containing PHI.
+    Returns (structured_text, input_tokens, output_tokens).
+    Raises RuntimeError on API error.
     """
-    if not _NVIDIA_API_KEY:
-        _logger.warning(
-            "NVIDIA_API_KEY not set — falling back to raw text extraction. "
-            "Set NVIDIA_API_KEY to enable Nemotron Parse."
-        )
-        return _fallback_parse(source)
-
-    # --- Resolve source to bytes or image_url list -------------------------
-    content_items: list[dict[str, Any]] = []
-    page_count = 0
-
-    if isinstance(source, str) and source.startswith("http"):
-        if _is_pdf(source):
-            # Download PDF, render to PNG pages
-            _logger.info("Downloading PDF from URL for page rendering")
-            pdf_bytes = _download_url(source)
-            page_b64s = _pdf_to_page_images(pdf_bytes)
-            page_count = len(page_b64s)
-            content_items = [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{b64}"},
-                }
-                for b64 in page_b64s
-            ]
-        else:
-            # Direct image URL (PNG, JPEG, etc.)
-            page_count = 1
-            content_items = [
-                {"type": "image_url", "image_url": {"url": source}}
-            ]
-
-    elif isinstance(source, (str, Path)) and not str(source).startswith("http"):
-        path = Path(source)
-        if not path.exists():
-            raise ValueError(f"File not found: {path}")
-        doc_bytes = path.read_bytes()
-        if _is_pdf(source) or _is_pdf(doc_bytes):
-            page_b64s = _pdf_to_page_images(doc_bytes)
-            page_count = len(page_b64s)
-            content_items = [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{b64}"},
-                }
-                for b64 in page_b64s
-            ]
-        else:
-            # Local image file
-            media_type = _infer_media_type(path)
-            doc_b64 = base64.b64encode(doc_bytes).decode()
-            page_count = 1
-            content_items = [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{media_type};base64,{doc_b64}"},
-                }
-            ]
-
-    elif isinstance(source, bytes):
-        if _is_pdf(source):
-            page_b64s = _pdf_to_page_images(source)
-            page_count = len(page_b64s)
-            content_items = [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{b64}"},
-                }
-                for b64 in page_b64s
-            ]
-        else:
-            doc_b64 = base64.b64encode(source).decode()
-            page_count = 1
-            content_items = [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{doc_b64}"},
-                }
-            ]
-    else:
-        raise ValueError(f"Unsupported source type: {type(source)}")
-
-    if not content_items:
-        return _fallback_parse(source)
-
-    # --- Build NIM request -------------------------------------------------
-    system_prompt = f"{_PARSE_SYSTEM_PROMPT} Document type: {document_type}."
-    content_items.append(
-        {"type": "text", "text": "Parse this document and return structured markdown."}
-    )
-
     payload = json.dumps({
         "model": _MODEL,
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": content_items},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{image_b64}"},
+                    },
+                    {
+                        "type": "text",
+                        "text": "Parse this document page and return structured markdown.",
+                    },
+                ],
+            },
         ],
         "max_tokens": 4096,
         "temperature": 0,
@@ -293,36 +192,118 @@ def parse_document(
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")
         raise RuntimeError(f"Nemotron Parse API error {e.code}: {body}") from e
-    except (urllib.error.URLError, TimeoutError) as e:
-        _logger.warning("Nemotron Parse unreachable: %s — using fallback", e)
-        return _fallback_parse(source)
 
-    structured_text = (
+    text = (
         data.get("choices", [{}])[0]
         .get("message", {})
         .get("content", "")
     )
     usage = data.get("usage", {})
+    return text, usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+
+def parse_document(
+    source: str | Path | bytes,
+    document_type: str = "clinical",
+) -> ParseResult:
+    """Parse a clinical document using Nemotron Parse.
+
+    Args:
+        source: Local file path, public image URL, or raw bytes (PDF or image).
+        document_type: 'clinical', 'prior_auth', 'eob', 'treatment_plan', 'lab_report'
+
+    Returns:
+        ParseResult with structured_text (markdown).
+
+    PDFs are rendered page-by-page via pypdfium2; each page is sent as a
+    separate NIM request (NIM accepts one image per call) and results
+    are concatenated with page separators.
+
+    PHI NOTE: content sent to NVIDIA NIM cloud. Use NEMOTRON_PARSE_BASE_URL
+    to point at a self-hosted NIM endpoint for PHI documents.
+    """
+    if not _NVIDIA_API_KEY:
+        _logger.warning(
+            "NVIDIA_API_KEY not set — falling back to raw text. "
+            "Set NVIDIA_API_KEY to enable Nemotron Parse."
+        )
+        return _fallback_parse(source)
+
+    system_prompt = f"{_PARSE_SYSTEM_PROMPT} Document type: {document_type}."
+
+    # Resolve source to list of base64 PNG strings (one per page/image)
+    page_b64s: list[str] = []
+
+    if isinstance(source, str) and source.startswith("http"):
+        if _is_pdf(source):
+            pdf_bytes = _download_url(source)
+            page_b64s = _pdf_to_page_images(pdf_bytes)
+        else:
+            # Direct image URL: download and encode
+            img_bytes = _download_url(source)
+            page_b64s = [base64.b64encode(img_bytes).decode()]
+
+    elif isinstance(source, (str, Path)) and not str(source).startswith("http"):
+        path = Path(source)
+        if not path.exists():
+            raise ValueError(f"File not found: {path}")
+        doc_bytes = path.read_bytes()
+        if _is_pdf(source) or _is_pdf(doc_bytes):
+            page_b64s = _pdf_to_page_images(doc_bytes)
+        else:
+            page_b64s = [base64.b64encode(doc_bytes).decode()]
+
+    elif isinstance(source, bytes):
+        if _is_pdf(source):
+            page_b64s = _pdf_to_page_images(source)
+        else:
+            page_b64s = [base64.b64encode(source).decode()]
+
+    else:
+        raise ValueError(f"Unsupported source type: {type(source)}")
+
+    if not page_b64s:
+        return _fallback_parse(source)
+
+    # Call NIM once per page, concatenate results
+    page_texts: list[str] = []
+    total_input = 0
+    total_output = 0
+
+    for i, b64 in enumerate(page_b64s):
+        try:
+            text, inp, out = _call_nim_api(b64, system_prompt)
+            page_texts.append(f"<!-- page {i + 1} -->\n{text}")
+            total_input += inp
+            total_output += out
+            _logger.info("Page %d/%d parsed: %d words", i + 1, len(page_b64s), len(text.split()))
+        except (RuntimeError, urllib.error.URLError, TimeoutError) as e:
+            _logger.warning("Page %d failed: %s — skipping", i + 1, e)
+            page_texts.append(f"<!-- page {i + 1}: parse failed -->")
+
+    structured_text = "\n\n".join(page_texts)
 
     _logger.info(
-        "Nemotron Parse complete: pages=%d output_words=%d input_tokens=%d",
-        page_count,
-        len(structured_text.split()),
-        usage.get("prompt_tokens", 0),
+        "Nemotron Parse complete: pages=%d total_words=%d input_tokens=%d",
+        len(page_b64s), len(structured_text.split()), total_input,
     )
 
     return ParseResult(
         structured_text=structured_text,
-        input_tokens=usage.get("prompt_tokens", 0),
-        output_tokens=usage.get("completion_tokens", 0),
+        input_tokens=total_input,
+        output_tokens=total_output,
         model=_MODEL,
         parse_method="nemotron_parse_nim",
-        page_count=page_count,
+        page_count=len(page_b64s),
     )
 
 
 def _infer_media_type(path: Path) -> str:
-    suffix = path.suffix.lower()
     return {
         ".png": "image/png",
         ".jpg": "image/jpeg",
@@ -331,26 +312,20 @@ def _infer_media_type(path: Path) -> str:
         ".tif": "image/tiff",
         ".bmp": "image/bmp",
         ".webp": "image/webp",
-    }.get(suffix, "image/png")
+    }.get(path.suffix.lower(), "image/png")
 
 
 def _fallback_parse(source: str | Path | bytes) -> ParseResult:
-    """Fallback: return raw text when NVIDIA_API_KEY is not set."""
     if isinstance(source, bytes):
         try:
             text = source.decode("utf-8", errors="replace")
         except Exception:
             text = "[Binary content — set NVIDIA_API_KEY for structured parsing]"
     elif isinstance(source, (str, Path)) and not str(source).startswith("http"):
-        path = Path(source)
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
+            text = Path(source).read_text(encoding="utf-8", errors="replace")
         except Exception:
-            text = f"[Could not read {path} — set NVIDIA_API_KEY for structured parsing]"
+            text = f"[Could not read {source} — set NVIDIA_API_KEY for structured parsing]"
     else:
         text = str(source)
-
-    return ParseResult(
-        structured_text=text,
-        parse_method="raw_text_fallback",
-    )
+    return ParseResult(structured_text=text, parse_method="raw_text_fallback")

@@ -21,7 +21,11 @@ API: NVIDIA NIM (OpenAI-compatible)
   Model: nvidia/nemotron-parse
   Auth:  NVIDIA_API_KEY environment variable
 
-NIM constraint: exactly one user message per request, no system message.
+NIM constraints:
+  - Exactly one user message per request (no system message)
+  - Content must be image-only (no text content items)
+  - PDFs must be converted to PNG images first (JPEG/PNG/BMP/TIFF/WEBP only)
+
 PDFs are rendered page-by-page via pypdfium2; each page is a separate call.
 
 For PHI compliance, deploy NIM self-hosted on-premises so no document
@@ -53,14 +57,6 @@ _BASE_URL = os.environ.get(
 _MODEL = "nvidia/nemotron-parse"
 _TIMEOUT = 60
 _MAX_PAGES = 10
-
-_USER_PROMPT = (
-    "You are a clinical document parser. Extract and structure all content "
-    "from this document page. Preserve table structure as markdown tables. "
-    "Maintain reading order. Extract: patient demographics, diagnosis codes, "
-    "procedure codes, medication lists, authorization decisions, dates, and "
-    "provider information. Output clean, structured markdown."
-)
 
 
 class ParseResult:
@@ -141,20 +137,19 @@ def _pdf_to_page_images(pdf_bytes: bytes) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# NIM API call — exactly one user message, no system message
+# NIM API call — image-only, single user message
 # ---------------------------------------------------------------------------
 
 
-def _call_nim_api(image_b64: str, document_type: str) -> tuple[str, int, int]:
+def _call_nim_api(image_b64: str) -> tuple[str, int, int]:
     """Send one base64 PNG to Nemotron Parse NIM.
 
-    NIM constraint: messages array must contain exactly one user message.
-    No system message is permitted.
+    NIM constraints enforced here:
+      - Single user message (no system message)
+      - Image-only content (no text items permitted)
 
     Returns (structured_text, input_tokens, output_tokens).
     """
-    user_text = f"{_USER_PROMPT} Document type: {document_type}."
-
     payload = json.dumps({
         "model": _MODEL,
         "messages": [
@@ -164,10 +159,6 @@ def _call_nim_api(image_b64: str, document_type: str) -> tuple[str, int, int]:
                     {
                         "type": "image_url",
                         "image_url": {"url": f"data:image/png;base64,{image_b64}"},
-                    },
-                    {
-                        "type": "text",
-                        "text": user_text,
                     },
                 ],
             },
@@ -216,13 +207,14 @@ def parse_document(
 
     Args:
         source: Local file path, public image URL, or raw bytes (PDF or image).
-        document_type: 'clinical', 'prior_auth', 'eob', 'treatment_plan', 'lab_report'
+        document_type: Informational hint stored in ParseResult metadata.
+                       One of: 'clinical', 'prior_auth', 'eob',
+                       'treatment_plan', 'lab_report'
 
     Returns:
         ParseResult with structured_text (markdown).
 
-    PDFs are rendered page-by-page via pypdfium2; each page is a separate
-    NIM call (NIM accepts exactly one user message per request).
+    PDFs are rendered page-by-page; each page is a separate NIM call.
     Results are concatenated with page markers.
 
     PHI NOTE: content sent to NVIDIA NIM cloud. Use NEMOTRON_PARSE_BASE_URL
@@ -273,7 +265,7 @@ def parse_document(
 
     for i, b64 in enumerate(page_b64s):
         try:
-            text, inp, out = _call_nim_api(b64, document_type)
+            text, inp, out = _call_nim_api(b64)
             page_texts.append(f"<!-- page {i + 1} -->\n{text}")
             total_input += inp
             total_output += out

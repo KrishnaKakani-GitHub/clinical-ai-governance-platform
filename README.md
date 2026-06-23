@@ -8,6 +8,34 @@ A production-grade reference implementation for deploying LLM agents over clinic
 
 [![CI](https://github.com/KrishnaKakani-GitHub/clinical-ai-governance-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/KrishnaKakani-GitHub/clinical-ai-governance-platform/actions)
 
+## End-to-end pipeline
+
+```
+Raw PDF / prior auth letter / treatment plan
+  ↓
+  parse_clinical_document  (Nemotron Parse — NVIDIA NIM)
+  Multi-column OCR, table extraction, reading-order reconstruction
+  ↓
+  extract_entities  (ClinicalNLP — Anthropic structured output, temp=0)
+  ICD-10-CM · LOINC · NPI · RxNorm · calibrated confidence
+  ↓
+  search_guidelines  (RAG — BM25 + ChromaDB hybrid, RRF fusion)
+  Evidence-based thresholds from 8 clinical guidelines
+  ↓
+  search_clinical_trials  (ClinicalTrials.gov v2 API — on flagged obs)
+  Recruiting trials the patient may qualify for
+  ↓
+  propose_observation  (LOINC deterministic gate — 14 codes)
+  Hard reject on impossible values · warning on clinical flags
+  ↓
+  ═ HUMAN-IN-THE-LOOP GATE ═
+  approve_write / reject_write  (verified approver only)
+  ↓
+  SQLite commit  (WAL mode, FK enforcement)
+  ↓
+  SHA-256 audit chain  (tamper-evident JSONL, verify_chain())
+```
+
 ## Day-by-day build plan
 
 * Day 1 ✓ — SQLite store, tamper-evident audit, auth layer
@@ -18,6 +46,7 @@ A production-grade reference implementation for deploying LLM agents over clinic
 * Day 6 ✓ — Eval harness: golden dataset, LLM-as-judge, GitHub Actions CI
 * Day 7 ✓ — HTTP server (FastAPI SSE), Dockerfile, Railway deploy
 * Day 8 ✓ — ClinicalTrials.gov integration: surface recruiting trials on flagged observations
+* Day 9 ✓ — Nemotron Parse: raw PDF → structured text → NLP → validation → audit
 
 ## Architecture
 
@@ -25,6 +54,10 @@ A production-grade reference implementation for deploying LLM agents over clinic
 ┌──────────────────────────────────────────────────────────────────────┐
 │           Clinical AI Governance Platform                          │
 │                                                                    │
+│  [IN]  Nemotron Parse (NVIDIA NIM)                                │
+│  Raw PDF → structured markdown (prior auth, EOB, treatment plan)  │
+│                        │                                           │
+│                        ▼                                           │
 │  Agent SDK Orchestration  (src/clinical_agent/)                   │
 │  ┌────────────┐  ┌────────────┐  ┌───────────────┐              │
 │  │  Reader     │─▶│  RAG        │─▶│  Proposal      │              │
@@ -32,7 +65,7 @@ A production-grade reference implementation for deploying LLM agents over clinic
 │  └────────────┘  └────────────┘  └───────────────┘              │
 │  PostToolUse hooks: audit + cost/latency tracking                  │
 │                                                                    │
-│  MCP Server  (FastMCP 3.x)  9 tools · 2 resources · 2 prompts     │
+│  MCP Server  (FastMCP 3.x)  10 tools · 2 resources · 2 prompts   │
 │                                                                    │
 │  Deterministic Validation  (validator.py)                         │
 │  LOINC registry · value ranges · unit enforcement                 │
@@ -42,11 +75,7 @@ A production-grade reference implementation for deploying LLM agents over clinic
 │  │ WAL · FK      │  │ BM25 + Semantic│  │ SHA-256 JSONL   │ │
 │  └────────────────┘  └────────────────┘  └─────────────────┘ │
 │                                                                    │
-│  ClinicalTrials.gov v2 API (trials.py)                            │
-│  Surfaces recruiting trials on flagged observations               │
-│  PHI-safe: only condition strings transmitted externally           │
-│                                                                    │
-│  Eval Harness (evals/) · 25 golden cases · LLM-as-judge           │
+│  ClinicalTrials.gov v2 · Eval Harness (25 cases, LLM-as-judge)   │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -69,7 +98,8 @@ A production-grade reference implementation for deploying LLM agents over clinic
 | GitHub Actions CI (pytest + eval regression gate) | ✓ Day 6 |
 | HTTP server (FastAPI SSE, claude.ai connector) | ✓ Day 7 |
 | Dockerfile + Railway deploy | ✓ Day 7 |
-| ClinicalTrials.gov integration (flagged observation → trial search) | ✓ Day 8 |
+| ClinicalTrials.gov integration (flagged obs → trial search) | ✓ Day 8 |
+| Nemotron Parse — raw PDF → structured text → NLP → audit | ✓ Day 9 |
 
 ## Performance (eval harness, smoke suite)
 
@@ -107,6 +137,8 @@ Settings → Connectors → Add → `https://clinical-ai-governance-platform-pro
 | Variable | Default | Purpose |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | — | Required for Agent SDK + NLP |
+| `NVIDIA_API_KEY` | — | Required for Nemotron Parse (NVIDIA NIM) |
+| `NEMOTRON_PARSE_BASE_URL` | NIM cloud | Override with self-hosted NIM URL for PHI docs |
 | `FHIR_MCP_DB` | `data/fhir.db` | SQLite database path |
 | `FHIR_MCP_ACTOR` | `agent:dev` | Agent audit identity |
 | `FHIR_MCP_AUDIT_FILE` | stderr | Audit JSONL path |
@@ -126,7 +158,6 @@ python3 scripts/audit_verify.py data/audit.jsonl
 
 ```bash
 python3 scripts/run_evals.py --suite smoke
-python3 scripts/run_evals.py --suite full
 python3 scripts/run_evals.py --suite full --judge
 ```
 
@@ -135,7 +166,7 @@ python3 scripts/run_evals.py --suite full --judge
 ```
 src/
   fhir_mcp/
-    server.py        # FastMCP 9 tools + resources + prompts
+    server.py        # FastMCP 10 tools + resources + prompts
     store.py         # SQLite store (only PHI touchpoint)
     models.py        # Pydantic v2 FHIR models
     audit.py         # SHA-256 hash-chain audit
@@ -145,6 +176,7 @@ src/
     nlp.py           # Clinical NLP entity extraction
     confidence.py    # Calibrated confidence scoring
     trials.py        # ClinicalTrials.gov v2 API client
+    parse.py         # Nemotron Parse (NVIDIA NIM) client
     http_server.py   # FastAPI SSE transport
   clinical_agent/
     orchestrator.py  # ClinicalOrchestrator (3-subagent workflow)

@@ -1,24 +1,24 @@
 """FHIR MCP server — Clinical AI Governance Platform.
 
 This is the file Claude Code and the Agent SDK launch. It defines:
-  - 9 tools (3 read, 4 write-gate, 1 RAG search, 1 ClinicalTrials.gov)
+  - 10 tools (3 read, 4 write-gate, 1 RAG search, 1 ClinicalTrials.gov, 1 Nemotron Parse)
   - 2 MCP resources (fhir://patient/{id}/summary, fhir://guidelines/index)
   - 2 MCP prompts (review_pending, patient_overview)
 
-Each tool:
-  1. Verifies the caller's identity (auth layer)
-  2. Delegates to the store / RAG / trials client
-  3. Emits a tamper-evident audit record on both success and error paths
+End-to-end pipeline (Day 9):
+  Raw PDF/Doc
+    → parse_clinical_document (Nemotron Parse)  → structured markdown
+    → [nlp.py] extract_entities                  → ICD-10/LOINC/NPI
+    → propose_observation (LOINC gate)            → staged write
+    → approve_write (human gate)                  → committed
+    → audit chain                                 → SHA-256 JSONL
 
-Prompt caching: the system block and the guidelines block are marked
-with cache_control breakpoints so repeated calls reuse the KV cache.
-
-Extended thinking (Day 4 routing): when a proposal value is above the
-clinical flag threshold, the orchestrator routes the Proposal Subagent
-into extended thinking mode (budget_tokens=5000) before finalising.
+PHI NOTE on Nemotron Parse:
+  Cloud NIM endpoint: synthetic/de-identified documents only.
+  Self-hosted NIM (NEMOTRON_PARSE_BASE_URL): safe for PHI.
 
 The write gate invariant is preserved:
-  - Agents can READ, SEARCH, PROPOSE, and LOOK UP TRIALS
+  - Agents can READ, SEARCH, PROPOSE, LOOK UP TRIALS, and PARSE DOCUMENTS
   - Only a verified human approver can COMMIT via approve_write
 
 Run locally:   python -m fhir_mcp.server
@@ -37,6 +37,7 @@ from fastmcp import FastMCP
 from .audit import audit
 from .auth import AuthError, verify_agent_actor, verify_approver
 from .models import ProposedObservation
+from .parse import parse_document
 from .rag import get_rag
 from .store import FhirStore, StoreError
 from .trials import search_trials_for_condition
@@ -51,8 +52,6 @@ _DB_PATH = Path(
 
 mcp = FastMCP("clinical-ai-governance")
 store = FhirStore(_DB_PATH)
-
-# Agent actor identity. In production this comes from authenticated identity.
 _AGENT_ACTOR = os.environ.get("FHIR_MCP_ACTOR", "agent:dev")
 
 
@@ -103,6 +102,67 @@ def list_observations(patient_id: str, reason: str) -> list[dict]:
     return [o.model_dump(mode="json") for o in obs]
 
 
+# --- Nemotron Parse tool ------------------------------------------------------
+
+
+@mcp.tool()
+def parse_clinical_document(
+    source: str,
+    document_type: str = "clinical",
+    reason: str = "",
+) -> dict:
+    """Parse a clinical document using Nemotron Parse (NVIDIA NIM).
+
+    First stage of the end-to-end pipeline:
+      parse_clinical_document → [extract entities via nlp.py] → propose_observation
+
+    Nemotron Parse handles complex document layouts that defeat standard OCR:
+    multi-column prior auth letters, table-heavy EOB statements, treatment plans
+    with mixed prose and structured fields.
+
+    Args:
+        source: File path, public URL, or base64-encoded document bytes.
+                For PHI documents, use a self-hosted NIM endpoint
+                (set NEMOTRON_PARSE_BASE_URL) so content stays on-prem.
+        document_type: One of 'clinical', 'prior_auth', 'eob',
+                       'treatment_plan', 'lab_report'. Guides the parser.
+        reason: Why you are parsing this document (audited).
+
+    Returns:
+        dict with 'structured_text' (markdown), token counts, and parse_method.
+
+    PHI NOTE: If NVIDIA_API_KEY is set and document contains PHI, deploy
+    NIM self-hosted and set NEMOTRON_PARSE_BASE_URL to the internal endpoint.
+    """
+    try:
+        verify_agent_actor(_AGENT_ACTOR)
+    except AuthError as e:
+        audit(actor=_AGENT_ACTOR, action="parse_clinical_document", reason=reason,
+              outcome="error", extra={"error": str(e)})
+        raise
+
+    try:
+        result = parse_document(source=source, document_type=document_type)
+    except (ValueError, RuntimeError) as e:
+        audit(actor=_AGENT_ACTOR, action="parse_clinical_document", reason=reason,
+              outcome="error", extra={"error": str(e)})
+        raise
+
+    audit(
+        actor=_AGENT_ACTOR, action="parse_clinical_document", reason=reason,
+        extra={
+            "document_type": document_type,
+            "parse_method": result.parse_method,
+            "output_word_count": result.output_word_count,
+            "input_tokens": result.input_tokens,
+            "output_tokens": result.output_tokens,
+            # PHI NOTE: source path logged but not content
+            "source_type": "url" if str(source).startswith("http") else "file",
+        },
+    )
+    return result.to_dict()
+
+
 # --- RAG search tool ----------------------------------------------------------
 
 
@@ -113,18 +173,7 @@ def search_guidelines(
     loinc_codes: str = "",
     reason: str = "",
 ) -> list[dict]:
-    """Search clinical guidelines using hybrid BM25 + semantic retrieval.
-
-    Returns ranked guidelines relevant to the query. Use this before proposing
-    an observation to ground the proposal in evidence-based thresholds.
-
-    Args:
-        query:       Clinical question (e.g. 'heart rate threshold for AF rate control').
-        k:           Number of results (default 4, max 8).
-        loinc_codes: Optional comma-separated LOINC codes to filter by
-                     (e.g. '8867-4,55284-4').
-        reason:      Why you are searching (audited).
-    """
+    """Search clinical guidelines using hybrid BM25 + semantic retrieval."""
     try:
         verify_agent_actor(_AGENT_ACTOR)
     except AuthError as e:
@@ -134,25 +183,16 @@ def search_guidelines(
 
     k = min(max(1, k), 8)
     loinc_filter = [c.strip() for c in loinc_codes.split(",") if c.strip()] or None
-
     rag = get_rag()
     results = rag.search_guidelines(query, k=k, loinc_filter=loinc_filter)
 
-    audit(
-        actor=_AGENT_ACTOR, action="search_guidelines", reason=reason,
-        extra={
-            "query": query[:120],
-            "k": k,
-            "loinc_filter": loinc_filter,
-            "result_count": len(results),
-        },
-    )
+    audit(actor=_AGENT_ACTOR, action="search_guidelines", reason=reason,
+          extra={"query": query[:120], "k": k, "loinc_filter": loinc_filter,
+                 "result_count": len(results)})
     return [
         {
-            "rank": r["rank"],
-            "score": r["score"],
-            "id": r["guideline"]["id"],
-            "title": r["guideline"]["title"],
+            "rank": r["rank"], "score": r["score"],
+            "id": r["guideline"]["id"], "title": r["guideline"]["title"],
             "source": r["guideline"]["source"],
             "condition": r["guideline"]["condition"],
             "loinc_codes": r["guideline"].get("loinc_codes", []),
@@ -175,19 +215,9 @@ def search_clinical_trials(
 ) -> list[dict]:
     """Search ClinicalTrials.gov for recruiting trials matching a condition.
 
-    Call this when search_guidelines returns results with validation_warnings
-    (i.e. flagged observations) to surface trials the patient may qualify for.
-    Only condition strings are sent externally — no patient identifiers.
-
-    Args:
-        condition:    Clinical condition (e.g. 'hypertension', 'type 2 diabetes').
-        loinc_codes:  Optional comma-separated LOINC codes to enrich the search
-                      (e.g. '55284-4' maps to 'hypertension').
-        max_results:  Max trials to return (default 5, max 10).
-        reason:       Why you are searching (audited).
-
-    PHI NOTE: No patient identifiers are sent to ClinicalTrials.gov.
-    Only the condition string is transmitted externally.
+    Call when search_guidelines returns validation_warnings (flagged observations)
+    to surface trials the patient may qualify for.
+    PHI-safe: only condition strings transmitted externally.
     """
     try:
         verify_agent_actor(_AGENT_ACTOR)
@@ -198,22 +228,12 @@ def search_clinical_trials(
 
     max_results = min(max(1, max_results), 10)
     codes = [c.strip() for c in loinc_codes.split(",") if c.strip()]
-
     trials = search_trials_for_condition(
-        condition=condition,
-        loinc_codes=codes or None,
-        max_results=max_results,
+        condition=condition, loinc_codes=codes or None, max_results=max_results,
     )
-
-    audit(
-        actor=_AGENT_ACTOR, action="search_clinical_trials", reason=reason,
-        extra={
-            "condition": condition[:120],
-            "loinc_codes": codes,
-            "result_count": len(trials),
-            "phi_transmitted": False,
-        },
-    )
+    audit(actor=_AGENT_ACTOR, action="search_clinical_trials", reason=reason,
+          extra={"condition": condition[:120], "loinc_codes": codes,
+                 "result_count": len(trials), "phi_transmitted": False})
     return trials
 
 
@@ -222,29 +242,13 @@ def search_clinical_trials(
 
 @mcp.tool()
 def propose_observation(
-    patient_id: str,
-    code: str,
-    display: str,
-    value: float,
-    unit: str,
-    effective_date: str,
-    reason: str,
+    patient_id: str, code: str, display: str,
+    value: float, unit: str, effective_date: str, reason: str,
 ) -> dict:
-    """Propose a new observation. Stages it for human approval; does NOT write.
-
-    Returns a pending-write ticket (write_id). A human must call
-    `approve_write` before anything is committed to the database.
-    `effective_date` is ISO format YYYY-MM-DD.
-    Any validation_warnings in the response are clinical flags that the
-    approver should review before approving.
-    """
+    """Propose a new observation. Stages it for human approval; does NOT write."""
     proposed = ProposedObservation(
-        patient_id=patient_id,
-        code=code,
-        display=display,
-        value=value,
-        unit=unit,
-        effective_date=date.fromisoformat(effective_date),
+        patient_id=patient_id, code=code, display=display,
+        value=value, unit=unit, effective_date=date.fromisoformat(effective_date),
     )
     try:
         verify_agent_actor(_AGENT_ACTOR)
@@ -253,21 +257,16 @@ def propose_observation(
         audit(actor=_AGENT_ACTOR, action="propose_observation", reason=reason,
               target_ids=[patient_id], outcome="error", extra={"error": str(e)})
         raise
-    audit(
-        actor=_AGENT_ACTOR, action="propose_observation", reason=reason,
-        target_ids=[patient_id],
-        extra={
-            "write_id": pending.write_id,
-            "status": "pending",
-            "has_warnings": bool(pending.validation_warnings),
-        },
-    )
+    audit(actor=_AGENT_ACTOR, action="propose_observation", reason=reason,
+          target_ids=[patient_id],
+          extra={"write_id": pending.write_id, "status": "pending",
+                 "has_warnings": bool(pending.validation_warnings)})
     return pending.model_dump(mode="json")
 
 
 @mcp.tool()
 def list_pending_writes(reason: str) -> list[dict]:
-    """List writes awaiting human approval. For the reviewer's eyes."""
+    """List writes awaiting human approval."""
     try:
         verify_agent_actor(_AGENT_ACTOR)
     except AuthError as e:
@@ -282,12 +281,7 @@ def list_pending_writes(reason: str) -> list[dict]:
 
 @mcp.tool()
 def approve_write(write_id: str, approver: str, reason: str) -> dict:
-    """HUMAN-IN-THE-LOOP GATE. Commit a staged write.
-
-    `approver` must identify the human authorising this. This is the only
-    path that writes patient data to the database. Review validation_warnings
-    in the pending write before approving.
-    """
+    """HUMAN-IN-THE-LOOP GATE. Commit a staged write."""
     try:
         verify_approver(approver)
         obs = store.approve_write(write_id, approver=approver)
@@ -303,7 +297,7 @@ def approve_write(write_id: str, approver: str, reason: str) -> dict:
 
 @mcp.tool()
 def reject_write(write_id: str, approver: str, reason: str) -> dict:
-    """HUMAN-IN-THE-LOOP GATE. Reject a staged write (nothing is committed)."""
+    """HUMAN-IN-THE-LOOP GATE. Reject a staged write."""
     try:
         verify_approver(approver)
         pending = store.reject_write(write_id, approver=approver)
@@ -328,31 +322,24 @@ def patient_summary(patient_id: str) -> str:
         observations = store.list_observations(patient_id)
     except (AuthError, StoreError) as e:
         return f"Error: {e}"
-
-    audit(
-        actor=_AGENT_ACTOR, action="read_patient_summary",
-        reason="MCP resource request", target_ids=[patient_id],
-    )
-
+    audit(actor=_AGENT_ACTOR, action="read_patient_summary",
+          reason="MCP resource request", target_ids=[patient_id])
     lines = [
         f"Patient: {patient.name} ({patient.id})",
         f"DOB: {patient.birth_date} | Gender: {patient.gender.value} | MRN: {patient.mrn}",
-        "",
-        "Observations:",
+        "", "Observations:",
     ]
     if not observations:
         lines.append("  (none recorded)")
     else:
         for o in observations:
-            lines.append(
-                f"  [{o.effective_date}] {o.display} ({o.code}): {o.value} {o.unit}"
-            )
+            lines.append(f"  [{o.effective_date}] {o.display} ({o.code}): {o.value} {o.unit}")
     return "\n".join(lines)
 
 
 @mcp.resource("fhir://guidelines/index")
 def guidelines_index() -> str:
-    """Index of available clinical guidelines (titles + LOINC codes)."""
+    """Index of available clinical guidelines."""
     rag = get_rag()
     lines = ["Clinical Guidelines Index:", ""]
     for g in rag._guidelines:
@@ -381,7 +368,6 @@ def review_pending() -> list[dict[str, Any]]:
         },
         indent=2,
     )
-
     return [
         {
             "role": "user",
@@ -390,23 +376,15 @@ def review_pending() -> list[dict[str, Any]]:
                     "type": "text",
                     "text": (
                         "You are a clinical documentation reviewer for the Clinical AI Governance Platform. "
-                        "Your role is to evaluate proposed FHIR observations that an AI agent has staged "
-                        "for approval. For each pending write you will:\n"
-                        "1. State the observation details clearly (patient, code, value, unit, date).\n"
-                        "2. Check whether the value is within the normal clinical range for this LOINC code.\n"
-                        "3. Note any validation_warnings from the deterministic gate.\n"
-                        "4. State your recommendation: APPROVE or REJECT with a one-sentence clinical justification.\n\n"
-                        "LOINC validation rules for this deployment:\n"
+                        "Your role is to evaluate proposed FHIR observations staged for approval.\n\n"
+                        "LOINC validation rules:\n"
                         f"<loinc_rules>\n{rule_summary}\n</loinc_rules>"
                     ),
                     "cache_control": {"type": "ephemeral"},
                 },
                 {
                     "type": "text",
-                    "text": (
-                        "Please review the pending writes returned by `list_pending_writes` "
-                        "and provide your approval/rejection recommendation for each one."
-                    ),
+                    "text": "Review pending writes from `list_pending_writes` and recommend APPROVE or REJECT.",
                 },
             ],
         }
@@ -415,9 +393,8 @@ def review_pending() -> list[dict[str, Any]]:
 
 @mcp.prompt()
 def patient_overview(patient_id: str) -> list[dict[str, Any]]:
-    """Prompt template for comprehensive patient overview with clinical context."""
+    """Prompt template for comprehensive patient overview."""
     summary = patient_summary(patient_id)
-
     return [
         {
             "role": "user",
@@ -425,22 +402,14 @@ def patient_overview(patient_id: str) -> list[dict[str, Any]]:
                 {
                     "type": "text",
                     "text": (
-                        "You are a clinical AI assistant helping a healthcare provider "
-                        "review patient data. Analyse the patient summary below and "
-                        "identify: (1) any observations outside normal ranges, "
-                        "(2) trends that warrant clinical attention, "
-                        "(3) observations that are missing but clinically indicated "
-                        "based on the patient's current data.\n\n"
-                        "<patient_summary>\n"
-                        f"{summary}\n"
-                        "</patient_summary>"
+                        "You are a clinical AI assistant. Analyse the patient summary and identify: "
+                        "(1) observations outside normal ranges, (2) trends warranting attention, "
+                        "(3) missing but clinically indicated observations.\n\n"
+                        f"<patient_summary>\n{summary}\n</patient_summary>"
                     ),
                     "cache_control": {"type": "ephemeral"},
                 },
-                {
-                    "type": "text",
-                    "text": "Please provide your clinical assessment of this patient.",
-                },
+                {"type": "text", "text": "Please provide your clinical assessment."},
             ],
         }
     ]

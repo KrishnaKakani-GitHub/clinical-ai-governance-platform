@@ -21,7 +21,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install
         run: |
-          pip install fastmcp pydantic rank-bm25 pytest pytest-asyncio httpx
+          pip install "fastmcp>=3.2,<4" "pydantic>=2.6,<3" rank-bm25 "pytest>=8" "pytest-asyncio>=0.23" httpx
           pip install -e . --no-deps
         env:
           FHIR_MCP_RAG_DISABLE_CHROMA: "1"
@@ -47,7 +47,7 @@ jobs:
           python-version: "3.11"
       - name: Install
         run: |
-          pip install fastmcp pydantic rank-bm25 pytest pytest-asyncio
+          pip install "fastmcp>=3.2,<4" "pydantic>=2.6,<3" rank-bm25 "pytest>=8" "pytest-asyncio>=0.23"
           pip install -e . --no-deps
         env:
           FHIR_MCP_RAG_DISABLE_CHROMA: "1"

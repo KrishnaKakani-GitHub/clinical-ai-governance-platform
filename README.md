@@ -438,15 +438,3 @@ python evidence_pipeline/demo_mimic.py
 # → Extracted 62 LOINC observations from 10 notes
 # → 100% validated, 0% rejected, 0 committed without human approval
 ```
-
-**JD responsibilities demonstrated:**
-
-| Responsibility | Module |
-|---|---|
-| Convert clinical questions → ICD-10/RxNorm/LOINC/SNOMED phenotypes | `ontology/cui_mapper.py` |
-| Curate clinician/consumer question library, common → rare | `datasets/medquad.py` (47K NIH QA pairs, GARD subset) |
-| Source external content: trials + CMS coverage | `demo.py` (live APIs) |
-| Metatag produced content for search and retrieval | output schema in `demo.py` |
-| Verify outputs / QA-QC against gold standard | FACTS Grounding + 3-layer eval stack |
-| Working knowledge of ICD-10/CPT/SNOMED/LOINC/RxNorm | crosswalk handles all five vocabularies |
-| Validate clinical AI against peer-reviewed benchmarks | MIMIC-CDM (Hager et al. 2024) 4-axis CDM eval |

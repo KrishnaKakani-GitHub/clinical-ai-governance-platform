@@ -1,34 +1,37 @@
-"""Run the MIMIC-CDM evaluation, or an unscored demo on real MIMIC notes.
+"""Run the MIMIC-CDM evaluation, or a structured demo on real MIMIC demo data.
 
 Two modes
 ---------
-1. SCORED BENCHMARK (default) -- Meditron/mock on labeled CDM cases, graded by
-   the Hager 4-axis rubric. Produces F1 scores.
+1. SCORED BENCHMARK (default) -- Meditron/mock on synthetic labeled CDM cases,
+   graded by the Hager 4-axis rubric. Produces F1 scores.
 
     python evals/run_cdm.py --model mock        # CI default; deterministic 1.000
     python evals/run_cdm.py --model meditron    # local Meditron-7B via Ollama
 
-2. UNSCORED DEMO -- Meditron reads REAL de-identified MIMIC-IV *demo* discharge
-   notes and proposes diagnosis/treatment/labs/procedures. The demo notes have
-   no gold labels, so NOTHING is scored -- this is a qualitative demonstration
-   that the agent runs on real, legitimately-accessed PhysioNet data.
+2. STRUCTURED DEMO -- Meditron reads REAL de-identified MIMIC-IV *demo*
+   structured data (coded labs + drugs per admission; the demo has NO free-text
+   notes) and proposes a diagnosis. The demo's coded gold ICD diagnoses are
+   present, so this can be shown unscored or lightly compared.
 
-    python evals/run_cdm.py --model meditron --demo-notes /path/to/mimic-demo
+    python evals/run_cdm.py --model meditron --demo-dir /path/OUTSIDE/repo/mimic-demo
+
+The MIMIC-IV demo excludes free-text notes, so there is no "discharge note" to
+read. We use the coded hosp/ tables (diagnoses_icd, labevents->LOINC,
+prescriptions, procedures_icd) instead.
 
 The 'meditron' backend is LOCAL-ONLY. Prerequisites:
-    brew install ollama          # or see https://ollama.com/download
-    ollama serve                 # start the local server (separate terminal)
+    brew install ollama && brew services start ollama
     ollama pull meditron:7b      # ~3.8 GB, one-time
-    pip install ollama           # the Python client
+    pip install ollama
 
-Demo notes: download the free subset from
+Demo data: download the free subset from
     https://physionet.org/content/mimic-iv-demo/   (free account, no CITI)
-The labeled, DUA-gated MIMIC-IV-Ext-CDM (CITI + signed DUA) is the legitimate
-*scored* source; it drops into mode 1 via the cdm dataset's --notes-dir later.
+Keep it OUTSIDE the repo. The loader refuses to read data from inside the repo
+tree so PHI can never be committed.
 
 RESEARCH USE ONLY -- Meditron's authors recommend against clinical deployment.
 PHI: read-only, no patient writes, governance invariant committed == 0 holds.
-Note text is never logged; only note_id and model output are shown.
+hadm_id-only logging; raw clinical values and dates are never logged or surfaced.
 """
 from __future__ import annotations
 
@@ -61,60 +64,63 @@ def _run_scored(model: str, as_json: bool) -> int:
     return 0 if report.passed else 1
 
 
-def _run_demo(model: str, notes_dir: str, limit: int, show_preview: bool) -> int:
-    """Unscored demonstration on real MIMIC demo notes (no gold labels)."""
+def _present(case) -> str:
+    """Build a structured presentation string from coded fields (no free text)."""
+    labs = ", ".join(case.labs_loinc[:12]) or "none recorded"
+    drugs = ", ".join(case.drugs[:12]) or "none recorded"
+    return (f"Admission with the following ordered labs (LOINC): {labs}. "
+            f"Medications administered: {drugs}. "
+            f"Propose the most likely diagnosis as ICD codes.")
+
+
+def _run_demo(model: str, demo_dir: str, limit: int) -> int:
+    """Structured demonstration on real MIMIC demo coded tables."""
     from evals.cdm_agent import make_backend
-    from evals.demo_notes import DemoNotesLoader
+    from evals.demo_structured import DemoStructuredLoader
 
     if model != "meditron":
         print("  Demo mode is intended for --model meditron (real model on real "
-              "notes). The mock backend has no gold labels to echo here.")
-    loader = DemoNotesLoader(notes_dir)
-    notes = loader.load(limit=limit)
-    if not notes:
-        print(f"  No notes found in {notes_dir}.")
+              "data). The mock backend has nothing to propose here.")
+    loader = DemoStructuredLoader(demo_dir)
+    cases = loader.load(limit=limit)
+    if not cases:
+        print(f"  No structured cases found under {demo_dir}/hosp.")
         return 1
 
     agent = make_backend(model, gold_lookup={})
 
-    print("\nMIMIC-IV Demo — Unscored CDM Demonstration (NOT a benchmark)")
-    print("=" * 66)
-    print(f"  backend : {model}   notes: {len(notes)}   source: {notes_dir}")
-    print("  No gold labels -> no scoring. Showing model proposals only.")
-    print("=" * 66)
+    print("\nMIMIC-IV Demo \u2014 Structured CDM Demonstration (NOT a benchmark)")
+    print("=" * 68)
+    print(f"  backend : {model}   admissions: {len(cases)}   source: {demo_dir}")
+    print("  Real de-identified coded data (no free-text notes in the demo).")
+    print("  Model proposes a diagnosis from labs + meds; gold ICD shown for")
+    print("  reference only (not a scored benchmark).")
+    print("=" * 68)
 
-    for note in notes:
-        resp = agent.propose(note.note_id, note.text)
-        print(f"\n  note_id: {note.note_id}")
-        if show_preview:
-            print(f"    preview : {note.preview()}")
-        print(f"    diagnosis (ICD-10) : {resp.proposed_icd or '—'}")
-        print(f"    treatment (RxNorm) : {resp.proposed_rxnorm or '—'}")
-        print(f"    labs (LOINC)       : {resp.proposed_loinc or '—'}")
-        print(f"    procedures (CPT)   : {resp.proposed_cpt or '—'}")
+    for case in cases:
+        resp = agent.propose(case.hadm_id, _present(case))
+        print(f"\n  {case.summary_line()}")
+        print(f"    model diagnosis (ICD) : {resp.proposed_icd or '\u2014'}")
+        print(f"    gold diagnosis (ICD)  : {case.diagnosis_icd[:6] or '\u2014'}")
 
-    print("\n  (Demonstration only — outputs are not graded against any key.)")
+    print("\n  (Demonstration only \u2014 reference comparison, not a scored metric.)")
     return 0
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="MIMIC-CDM model benchmark (scored) or demo-notes run (unscored)")
+        description="MIMIC-CDM model benchmark (scored) or structured demo (unscored)")
     parser.add_argument(
         "--model", default="mock", choices=["mock", "meditron"],
         help="Backend: 'mock' (deterministic upper bound) or 'meditron' (local).",
     )
     parser.add_argument(
-        "--demo-notes", default=None, metavar="DIR",
-        help="Path to real MIMIC-IV demo notes -> run UNSCORED demo instead of benchmark.",
+        "--demo-dir", default=None, metavar="DIR",
+        help="Path to real MIMIC-IV demo dir (OUTSIDE repo) -> structured demo.",
     )
     parser.add_argument(
         "--limit", type=int, default=5,
-        help="Max demo notes to run (demo mode only; default 5).",
-    )
-    parser.add_argument(
-        "--show-preview", action="store_true",
-        help="Show a short truncated note preview (operator opt-in; demo mode).",
+        help="Max admissions to run (demo mode only; default 5).",
     )
     parser.add_argument(
         "--json", action="store_true", help="Emit machine-readable JSON (scored mode).",
@@ -124,8 +130,8 @@ def main() -> int:
         level=logging.INFO, format="%(levelname)s %(name)s: %(message)s",
     )
 
-    if args.demo_notes:
-        return _run_demo(args.model, args.demo_notes, args.limit, args.show_preview)
+    if args.demo_dir:
+        return _run_demo(args.model, args.demo_dir, args.limit)
     return _run_scored(args.model, args.json)
 
 

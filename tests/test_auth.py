@@ -3,16 +3,37 @@ from __future__ import annotations
 
 import pytest
 
-from fhir_mcp.auth import AuthError, verify_agent_actor, verify_approver
+from fhir_mcp.auth import (
+    AuthConfigurationError,
+    AuthError,
+    verify_agent_actor,
+    verify_approver,
+)
+
+
+def test_unset_principals_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FHIR_MCP_PRINCIPALS", raising=False)
+    monkeypatch.delenv("FHIR_MCP_DEV_MODE", raising=False)
+    with pytest.raises(AuthConfigurationError):
+        verify_agent_actor("any-random-actor")
+
+
+def test_unset_approvers_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FHIR_MCP_APPROVERS", raising=False)
+    monkeypatch.delenv("FHIR_MCP_DEV_MODE", raising=False)
+    with pytest.raises(AuthConfigurationError):
+        verify_approver("anyone")
 
 
 def test_dev_mode_allows_any_actor(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("FHIR_MCP_PRINCIPALS", raising=False)
+    monkeypatch.setenv("FHIR_MCP_DEV_MODE", "true")
     verify_agent_actor("any-random-actor")  # must not raise
 
 
 def test_dev_mode_allows_any_approver(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("FHIR_MCP_APPROVERS", raising=False)
+    monkeypatch.setenv("FHIR_MCP_DEV_MODE", "true")
     verify_approver("anyone")  # must not raise
 
 
